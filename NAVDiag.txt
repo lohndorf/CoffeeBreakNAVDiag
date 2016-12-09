@@ -1,0 +1,542 @@
+OBJECT Table 73200 NAVDiag Log
+{
+  OBJECT-PROPERTIES
+  {
+    Date=06-12-16;
+    Time=08:36:19;
+    Modified=Yes;
+    Version List=NAVDiag;
+  }
+  PROPERTIES
+  {
+  }
+  FIELDS
+  {
+    { 1   ;   ;ID                  ;Integer       ;AutoIncrement=Yes }
+    { 3   ;   ;DiagCommand         ;Text250        }
+    { 4   ;   ;Date                ;DateTime       }
+    { 5   ;   ;User Name           ;Text50         }
+    { 6   ;   ;Type                ;Option        ;OptionString=Error,Information }
+    { 7   ;   ;Details             ;BLOB           }
+  }
+  KEYS
+  {
+    {    ;ID                                      ;Clustered=Yes }
+    {    ;Date                                     }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      InvalidFileNameCharactersTok@1001 : TextConst 'ENU=<>:"/\|?*';
+      NoDetailsMsg@1000 : TextConst 'ENU=The log does not contain details.';
+      DefaultPackageName@1002 : TextConst 'ENU=NAVDiagLog.txt';
+
+    PROCEDURE CreateInfoEntry@1(Msg@1000 : Text[250]);
+    BEGIN
+      CreateEntry(Msg,FALSE,'')
+    END;
+
+    PROCEDURE CreateInfoEntryWithDetails@13(Msg@1001 : Text[250];LogDetails@1002 : Text);
+    BEGIN
+      CreateEntry(Msg,FALSE,LogDetails)
+    END;
+
+    PROCEDURE CreateErrorEntry@4(Msg@1001 : Text[250]);
+    BEGIN
+      CreateEntry(Msg,TRUE,'')
+    END;
+
+    PROCEDURE CreateErrorEntryWithDetails@3(Msg@1000 : Text[250];LogDetails@1002 : Text);
+    BEGIN
+      CreateEntry(Msg,TRUE,LogDetails)
+    END;
+
+    LOCAL PROCEDURE CreateEntry@5(Msg@1001 : Text[250];IsErrorEntry@1002 : Boolean;LogDetails@1003 : Text);
+    VAR
+      BlobOutStream@1004 : OutStream;
+    BEGIN
+      INIT;
+      ID := 0;
+      DiagCommand:= Msg;
+      Date := CURRENTDATETIME;
+      "User Name" := USERID;
+
+      Details.CREATEOUTSTREAM(BlobOutStream);
+      BlobOutStream.WRITE(LogDetails);
+
+      IF IsErrorEntry THEN
+        Type := Type::Error
+      ELSE
+        Type := Type::Information;
+
+      INSERT
+    END;
+
+    PROCEDURE GetDetailsText@2() DetailsText : Text;
+    VAR
+      DetailsIn@1000 : InStream;
+    BEGIN
+      CALCFIELDS(Details);
+      Details.CREATEINSTREAM(DetailsIn);
+      DetailsIn.READ(DetailsText);
+    END;
+
+    PROCEDURE DownloadLogsArchive@8() : Text;
+    VAR
+      TempBlob@1001 : TEMPORARY Record 99008535;
+      FileManagement@1002 : Codeunit 419;
+      FileObj@1004 : File;
+      BlobOut@1005 : OutStream;
+      BlobIn@1006 : InStream;
+      LogFileName@1007 : Text;
+      LogsZipArchiveFilePath@1008 : Text;
+      PathInZipFile@1009 : Text;
+      RecordIdentifier@1003 : Text;
+      LogFileNameTxt@1000 : TextConst 'ENU=NAVDiagLogs.zip';
+    BEGIN
+      LogsZipArchiveFilePath := FileManagement.CreateZipArchiveObject;
+
+      SETAUTOCALCFIELDS(Details);
+      IF FINDSET THEN
+        REPEAT
+            RecordIdentifier := '';
+
+          IF RecordIdentifier = '' THEN
+            PathInZipFile := STRSUBSTNO('%1_%2_%3.txt',ID,DiagCommand)
+          ELSE
+            PathInZipFile := STRSUBSTNO('%1_%2_%3_%4.txt',ID,RecordIdentifier,DiagCommand);
+
+          // Delete from the file name the characters that are illegal when forming a file path
+          PathInZipFile := DELCHR(PathInZipFile,'=',InvalidFileNameCharactersTok);
+
+
+          IF Details.HASVALUE THEN BEGIN
+            LogFileName := FileManagement.ServerTempFileName('txt');
+            FileObj.WRITEMODE(TRUE);
+
+            FileObj.CREATE(LogFileName);
+            FileObj.CREATEOUTSTREAM(BlobOut);
+            Details.CREATEINSTREAM(BlobIn);
+            COPYSTREAM(BlobOut,BlobIn);
+            FileObj.CLOSE;
+
+            FileManagement.AddFileToZipArchive(LogFileName,PathInZipFile);
+            ERASE(LogFileName);
+          END;
+        UNTIL NEXT = 0;
+
+      FileManagement.CloseZipArchive;
+      {
+      // Powershell Logs
+      IF NOT GUIALLOWED THEN
+        EXIT(LogsZipArchiveFilePath);
+      }
+
+      TempBlob.INIT;
+      TempBlob.Blob.CREATEOUTSTREAM(BlobOut);
+      FileObj.OPEN(LogsZipArchiveFilePath);
+      FileObj.CREATEINSTREAM(BlobIn);
+      COPYSTREAM(BlobOut,BlobIn);
+      TempBlob.INSERT;
+
+      // Cleanup
+      FileObj.CLOSE;
+      FileManagement.DeleteServerFile(LogsZipArchiveFilePath);
+
+      EXIT(FileManagement.BLOBExport(TempBlob,LogFileNameTxt,TRUE))
+    END;
+
+    PROCEDURE DownloadLog@6(DefaultFileName@1002 : Text;ShowFileDialog@1003 : Boolean) : Text;
+    VAR
+      TempBlob@1000 : Record 99008535;
+      FileManagement@1001 : Codeunit 419;
+    BEGIN
+      CALCFIELDS(Details);
+      IF NOT Details.HASVALUE THEN BEGIN
+        MESSAGE(NoDetailsMsg);
+        EXIT;
+      END;
+
+      IF DefaultFileName = '' THEN
+        DefaultFileName := DefaultPackageName;
+
+      TempBlob.Blob := Details;
+
+      EXIT(FileManagement.BLOBExport(TempBlob,DefaultFileName,ShowFileDialog));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+
+OBJECT Codeunit 73200 NAVDiag PowerShell Runner
+{
+  OBJECT-PROPERTIES
+  {
+    Date=06-12-16;
+    Time=14:32:19;
+    Modified=Yes;
+    Version List=NAVDiag;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PSRunner@1000 : DotNet "'Microsoft.Dynamics.Nav.PowerShellRunner, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.PowerShellRunner";
+      ResultsEnumerator@1001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.IEnumerator";
+      Created@1003 : Boolean INDATASET;
+      ErrorEnumerator@1004 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Generic.IEnumerator`1";
+      MgmtModule@1006 : TextConst 'ENU=Microsoft.Dynamics.Nav.Management.dll';
+      Window@1002 : Dialog;
+
+    PROCEDURE InitializePSRunner@4() : Boolean;
+    BEGIN
+      //Initialize ps session
+      CreatePSRunner;
+
+      IF NOT Invoke THEN
+          EXIT(NOT PSRunnerHadErrors);
+
+      GetResultEnumerator(ResultsEnumerator);
+      GetErrorEnumerator(ErrorEnumerator);
+
+      EXIT(NOT PSRunnerHadErrors);
+    END;
+
+    LOCAL PROCEDURE CreatePSRunner@2() : Boolean;
+    BEGIN
+      IF Created THEN
+        EXIT(Created);
+      IF NOT ISNULL(PSRunner) THEN
+        EXIT(FALSE);
+
+      PSRunner := PSRunner.CreateInSandbox;
+      PSRunner.WriteEventOnError := TRUE;
+
+      Created := TRUE;
+      EXIT(Created);
+    END;
+
+    PROCEDURE AddCommand@5(Command@1000 : Text);
+    BEGIN
+      CreatePSRunner;
+      PSRunner.AddCommand(Command);
+    END;
+
+    PROCEDURE AddParameter@7(Name@1000 : Text;Value@1001 : Variant);
+    BEGIN
+      CreatePSRunner;
+      PSRunner.AddParameter(Name,Value);
+    END;
+
+    PROCEDURE AddParameterFlag@6(Name@1000 : Text);
+    BEGIN
+      CreatePSRunner;
+      PSRunner.AddParameter(Name);
+    END;
+
+    PROCEDURE Invoke@8() : Boolean;
+    BEGIN
+      PSRunner.BeginInvoke;
+        REPEAT
+          SLEEP(2000);
+          //(to be resilient against SQL connection drops)
+        UNTIL PSRunner.IsCompleted;
+       EXIT(NOT PSRunnerHadErrors);
+    END;
+
+    LOCAL PROCEDURE GetResultEnumerator@10(Enumerator@1000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.IEnumerator");
+    BEGIN
+      Enumerator := PSRunner.Results.GetEnumerator;
+    END;
+
+    PROCEDURE NextResult@1(VAR ReturnObject@1000 : DotNet "'Microsoft.Dynamics.Nav.PowerShellRunner, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.PSObjectAdapter") : Boolean;
+    BEGIN
+      IF ISNULL(ResultsEnumerator) THEN
+        EXIT(FALSE);
+
+      IF ResultsEnumerator.MoveNext THEN BEGIN
+        ReturnObject := ReturnObject.PSObjectAdapter;
+        ReturnObject.PSObject := ResultsEnumerator.Current;
+        EXIT(TRUE)
+      END;
+       EXIT(FALSE)
+    END;
+
+    PROCEDURE ImportModule@15();
+    BEGIN
+      CreatePSRunner;
+      PSRunner.ImportModule(PSModules);
+    END;
+
+    LOCAL PROCEDURE GetErrorEnumerator@18(Enumerator@1000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.IEnumerator");
+    BEGIN
+      Enumerator := PSRunner.Errors.GetEnumerator;
+    END;
+
+    PROCEDURE PSModules@11() : Text;
+    BEGIN
+      EXIT(APPLICATIONPATH + MgmtModule);
+    END;
+
+    LOCAL PROCEDURE PSRunnerHadErrors@13() : Boolean;
+    BEGIN
+      IF PSRunner.HadErrors THEN
+        PSRunner.WriteEventOnError(TRUE);
+      EXIT(PSRunner.HadErrors);
+    END;
+
+    PROCEDURE OpenWindow@3();
+    BEGIN
+      Window.OPEN(
+        'Running NAVDiag Powershell                \' +
+        'Status #1##################################');
+    END;
+
+    PROCEDURE UpdateWindow@12(Status@1000 : Text);
+    BEGIN
+      Window.UPDATE(1,Status);
+    END;
+
+    PROCEDURE CloseWindow@14();
+    BEGIN
+      Window.CLOSE;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+
+OBJECT Codeunit 73201 NAVDiag Diagnostic
+{
+  OBJECT-PROPERTIES
+  {
+    Date=06-12-16;
+    Time=10:17:01;
+    Modified=Yes;
+    Version List=NAVDiag;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            GetNavServerInstanceTxt@1008 : TextConst 'ENU=Get-NAVServerInstance';
+            "PSResults.GetProperty(Property)"@1007 : TextConst 'ENU=Get NAV Service Instance';
+            ServerInstanceParameterTxt@1006 : TextConst 'ENU=DisplayName';
+            GetServiceStateLogTxt@1005 : TextConst 'ENU=Get Service State';
+            GetEventLogTxt@1004 : TextConst 'ENU=get-eventlog';
+            GetEventLogLoggingTxt@1003 : TextConst 'ENU="Get last %1 Dynamics NAV event log entries "';
+            Versiontxt@1000 : TextConst 'ENU=Version';
+            GetNavServerInsLogTxt@1001 : TextConst 'ENU=Get NAV server instances';
+          BEGIN
+            PSSession.OpenWindow;
+            PSSession.UpdateWindow('Initializing');
+
+            PSSession.ImportModule();
+
+            PSSession.UpdateWindow('Getting NAV Services');
+            //Get NAV services and build numbers
+            PSSession.AddCommand(GetNavServerInstanceTxt);
+            RunPS(GetNavServerInsLogTxt,ServerInstanceParameterTxt);
+            RunPS(GetNavServerInsLogTxt,Versiontxt);
+
+            PSSession.UpdateWindow('Getting NAV State');
+            //Check state of all services.
+            PSSession.AddCommand(GetNavServerInstanceTxt);
+            RunPS(GetServiceStateLogTxt,'State');
+
+            PSSession.UpdateWindow('Reading Event Log');
+            //Get 10 last NAV event logs
+            PSSession.AddCommand(GetEventLogTxt);
+            //pssession.AddParameter('ComputerName','<´>');
+            PSSession.AddParameter('LogName','Application');
+            PSSession.AddParameter('Source','*DynamicsNAV*');
+            PSSession.AddParameter('Newest',10);
+            RunPS(STRSUBSTNO(GetEventLogLoggingTxt,10),'Message');
+
+            PSSession.CloseWindow;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PSSession@1002 : Codeunit 73200;
+      PSLogEntry@1000 : Record 73200;
+      ProcessNameTxt@1003 : TextConst;
+
+    LOCAL PROCEDURE RunPS@1(Command@1000 : Text;Property@1001 : Text);
+    VAR
+      PSResults@1002 : DotNet "'Microsoft.Dynamics.Nav.PowerShellRunner, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.PSObjectAdapter";
+      ErrorMsg@1003 : TextConst 'ENU=" Cmdlet failed to run, check event log"';
+    BEGIN
+      IF PSSession.InitializePSRunner THEN
+        WHILE PSSession.NextResult(PSResults) DO
+           PSLogEntry.CreateInfoEntryWithDetails(Command,PSResults.GetProperty(Property))
+      ELSE
+        PSLogEntry.CreateErrorEntry(Command+ErrorMsg);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+
+OBJECT Page 73200 NAVDiag Log
+{
+  OBJECT-PROPERTIES
+  {
+    Date=06-12-16;
+    Time=08:44:40;
+    Modified=Yes;
+    Version List=NAVDiag;
+  }
+  PROPERTIES
+  {
+    Editable=No;
+    InsertAllowed=No;
+    DeleteAllowed=No;
+    ModifyAllowed=No;
+    SourceTable=Table73200;
+    PageType=List;
+    ActionList=ACTIONS
+    {
+      { 5       ;    ;ActionContainer;
+                      ActionContainerType=ActionItems }
+      { 6       ;1   ;Action    ;
+                      Name=Top;
+                      CaptionML=ENU=Top;
+                      Promoted=Yes;
+                      PromotedIsBig=Yes;
+                      Image=MoveUp;
+                      OnAction=BEGIN
+                                 FINDFIRST
+                               END;
+                                }
+      { 7       ;1   ;Action    ;
+                      Name=Bottom;
+                      CaptionML=ENU=Bottom;
+                      Promoted=Yes;
+                      PromotedIsBig=Yes;
+                      Image=MoveDown;
+                      OnAction=BEGIN
+                                 FINDLAST
+                               END;
+                                }
+      { 9       ;1   ;Action    ;
+                      Name=Clear Log;
+                      Promoted=Yes;
+                      PromotedIsBig=Yes;
+                      Image=ClearLog;
+                      OnAction=BEGIN
+                                 DELETEALL;
+                                 CurrPage.UPDATE;
+                               END;
+                                }
+      { 15      ;1   ;Action    ;
+                      Name=Run Diagnostic;
+                      Promoted=Yes;
+                      PromotedIsBig=Yes;
+                      Image=Server;
+                      OnAction=BEGIN
+                                 Diag.RUN;
+                                 CurrPage.UPDATE;
+                               END;
+                                }
+      { 14      ;1   ;Action    ;
+                      Name=Download Log;
+                      Promoted=Yes;
+                      PromotedIsBig=Yes;
+                      Image=ExportFile;
+                      PromotedCategory=Report;
+                      OnAction=BEGIN
+                                 Rec.DownloadLogsArchive();
+                               END;
+                                }
+    }
+  }
+  CONTROLS
+  {
+    { 1   ;0   ;Container ;
+                ContainerType=ContentArea }
+
+    { 2   ;1   ;Group     ;
+                Name=General;
+                CaptionML=ENU=General;
+                GroupType=Repeater;
+                Layout=Columns }
+
+    { 3   ;2   ;Field     ;
+                Width=17;
+                SourceExpr=ID }
+
+    { 4   ;2   ;Field     ;
+                Name=Log;
+                Width=2000;
+                CaptionML=ENU=Log;
+                SourceExpr=DiagCommand;
+                MultiLine=Yes }
+
+    { 11  ;    ;Container ;
+                ContainerType=FactBoxArea }
+
+    { 10  ;1   ;Part      ;
+                Name=Show Details;
+                SubPageLink=ID=FIELD(ID);
+                PagePartID=Page73201;
+                PartType=Page;
+                UpdatePropagation=Both }
+
+  }
+  CODE
+  {
+    VAR
+      Diag@1000 : Codeunit 73201;
+
+    BEGIN
+    END.
+  }
+}
+
+OBJECT Page 73201 NAVDiag Log PS Results
+{
+  OBJECT-PROPERTIES
+  {
+    Date=06-12-16;
+    Time=08:41:24;
+    Modified=Yes;
+    Version List=NAVDiag;
+  }
+  PROPERTIES
+  {
+    SourceTable=Table73200;
+    PageType=CardPart;
+  }
+  CONTROLS
+  {
+    { 1   ;0   ;Container ;
+                ContainerType=ContentArea }
+
+    { 2   ;1   ;Field     ;
+                Width=50;
+                SourceExpr=GetDetailsText;
+                MultiLine=Yes }
+
+  }
+  CODE
+  {
+
+    BEGIN
+    END.
+  }
+}
+
